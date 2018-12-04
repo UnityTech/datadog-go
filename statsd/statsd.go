@@ -334,13 +334,13 @@ func hash(s []byte) uint32 {
 }
 func (c *Client) sendMsg(msg []byte) error {
 	// return an error if message is bigger than MaxUDPPayloadSize
+
+	if len(msg) > MaxUDPPayloadSize {
+		return errors.New("message size exceeds MaxUDPPayloadSize")
+	}
 	if c.sharded {
 		bucket := hash(msg) % numBuffers
 		buf := c.buffers[bucket]
-
-		if len(msg) > MaxUDPPayloadSize {
-			return errors.New("message size exceeds MaxUDPPayloadSize")
-		}
 
 		// if this client is buffered, then we'll just append this
 		if buf.bufferLength > 0 {

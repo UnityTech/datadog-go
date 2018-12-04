@@ -294,9 +294,11 @@ func (c *Client) Flush() error {
 		return nil
 	}
 	for _, b := range c.buffers {
-		b.Lock()
-		b.flushLocked()
-		b.Unlock()
+		func() {
+			b.Lock()
+			defer b.Unlock()
+			b.flushLocked()
+		}()
 	}
 	return nil
 }

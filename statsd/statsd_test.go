@@ -235,9 +235,12 @@ func TestBufferedClient(t *testing.T) {
 	total = 0
 
 	for _, buf := range client.buffers {
-		buf.Lock()
-		err = buf.flushLocked()
-		buf.Unlock()
+		func() {
+			buf.Lock()
+			defer buf.Unlock()
+			err = buf.flushLocked()
+		}()
+
 		if err != nil {
 			t.Errorf("Error sending: %s", err)
 		}
@@ -371,7 +374,6 @@ func stringsToBytes(ss []string) [][]byte {
 }
 
 func TestJoinMaxSize(t *testing.T) {
-	// c := Client{}
 	elements := stringsToBytes([]string{"abc", "abcd", "ab", "xyz", "foobaz", "x", "wwxxyyzz"})
 	b := StatsBuffer{}
 	res, n := b.joinMaxSize(elements, " ", 8)

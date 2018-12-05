@@ -75,7 +75,7 @@ var (
 	timingSuffix       = []byte("|ms")
 )
 
-const numBuffers = 32
+const numStripes = 1024
 
 // A statsdWriter offers a standard interface regardless of the underlying
 // protocol. For now UDS and UPD writers are available.
@@ -103,11 +103,13 @@ type Client struct {
 	Tags []string
 	// skipErrors turns off error passing and allows UDS to emulate UDP behaviour
 	SkipErrors bool
-	// BufferLength is the length of the buffer in commands.
+	// time between flushes
 	flushTime time.Duration
-	stop      chan struct{}
-	buffers   []*StatsBuffer
-
+	// channel to shut down
+	stop chan struct{}
+	// list of buffers to share load
+	buffers []*StatsBuffer
+	// bool to indicate we have many buffers
 	sharded bool
 }
 
@@ -138,6 +140,9 @@ func NewWithWriter(w statsdWriter) (*Client, error) {
 // NewBuffered returns a Client that buffers its output and sends it in chunks.
 // Buflen is the length of the buffer in number of commands.
 func NewBuffered(addr string, buflen int) (*Client, error) {
+	if buflen == 0 {
+		return nil, errors.New("Bad buflen")
+	}
 	client, err := New(addr)
 	if err != nil {
 		return nil, err
@@ -145,8 +150,8 @@ func NewBuffered(addr string, buflen int) (*Client, error) {
 	client.sharded = true
 	client.flushTime = time.Millisecond * 100
 	client.stop = make(chan struct{}, 1)
-	client.buffers = make([]*StatsBuffer, numBuffers)
-	for i := 0; i < numBuffers; i++ {
+	client.buffers = make([]*StatsBuffer, numStripes)
+	for i := 0; i < numStripes; i++ {
 		buf := StatsBuffer{
 			bufferLength: buflen,
 			commands:     make([][]byte, 0, buflen),
@@ -201,9 +206,8 @@ func (c *Client) SetWriteTimeout(d time.Duration) error {
 	if c == nil {
 		return nil
 	}
-	for _, buf := range c.buffers {
-		buf.writer.SetWriteTimeout(d)
-	}
+	c.sharedWriter.SetWriteTimeout(d)
+
 	return nil
 }
 
@@ -294,11 +298,9 @@ func (c *Client) Flush() error {
 		return nil
 	}
 	for _, b := range c.buffers {
-		func() {
-			b.Lock()
-			defer b.Unlock()
-			b.flushLocked()
-		}()
+		b.Lock()
+		b.flushLocked()
+		b.Unlock()
 	}
 	return nil
 }
@@ -339,14 +341,14 @@ func (c *Client) sendMsg(msg []byte) error {
 		return errors.New("message size exceeds MaxUDPPayloadSize")
 	}
 	if c.sharded {
-		bucket := hash(msg) % numBuffers
+		bucket := hash(msg) % numStripes
 		buf := c.buffers[bucket]
 
 		// if this client is buffered, then we'll just append this
 		if buf.bufferLength > 0 {
 			return buf.append(msg)
 		}
-		return nil
+		return errors.New("No buffer length")
 	}
 
 	_, err := c.sharedWriter.Write(msg)
@@ -415,10 +417,6 @@ func (c *Client) TimeInMilliseconds(name string, value float64, tags []string, r
 	return c.send(name, value, timingSuffix, tags, rate)
 }
 
-// Event sends the provided Event.
-
-// SimpleEvent sends an event with the provided title and text.
-
 // ServiceCheck sends the provided ServiceCheck.
 func (c *Client) ServiceCheck(sc *ServiceCheck) error {
 	if c == nil {
@@ -446,12 +444,12 @@ func (c *Client) Close() error {
 	case c.stop <- struct{}{}:
 	default:
 	}
-	bufLen := 0
+	total := 0
 	for _, buf := range c.buffers {
-		bufLen += buf.bufferLength
+		total += buf.bufferLength
 	}
 	// if this client is buffered, flush before closing the writer
-	if bufLen > 0 {
+	if total > 0 {
 		if err := c.Flush(); err != nil {
 			return err
 		}

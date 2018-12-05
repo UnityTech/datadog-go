@@ -75,7 +75,7 @@ var (
 	timingSuffix       = []byte("|ms")
 )
 
-const numStripes = 1024
+const numStripes = 64
 
 // A statsdWriter offers a standard interface regardless of the underlying
 // protocol. For now UDS and UPD writers are available.

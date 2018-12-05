@@ -223,21 +223,32 @@ func TestBufferedClient(t *testing.T) {
 	client.Distribution("dd", 1, nil, 1)
 	client.Timing("tt", dur, nil, 1)
 	client.Set("ss", "ss", nil, 1)
+	total := 0
+	for _, buf := range client.buffers {
+		total += len(buf.commands)
 
-	if len(client.commands) != (bufferLength - 1) {
-		t.Errorf("Expected client to have buffered %d commands, but found %d\n", (bufferLength - 1), len(client.commands))
 	}
-
+	if total != (bufferLength - 1) {
+		t.Errorf("Expected client to have buffered %d commands, but found %d\n", (bufferLength - 1), total)
+	}
 	client.Set("ss", "xx", nil, 1)
-	client.Lock()
-	err = client.flushLocked()
-	client.Unlock()
-	if err != nil {
-		t.Errorf("Error sending: %s", err)
+	total = 0
+
+	for _, buf := range client.buffers {
+		func() {
+			buf.Lock()
+			defer buf.Unlock()
+			err = buf.flushLocked()
+		}()
+
+		if err != nil {
+			t.Errorf("Error sending: %s", err)
+		}
+		total += len(buf.commands)
 	}
 
-	if len(client.commands) != 0 {
-		t.Errorf("Expecting send to flush commands, but found %d\n", len(client.commands))
+	if total != 0 {
+		t.Errorf("Expecting send to flush commands, but found %d\n", total)
 	}
 
 	buffer := make([]byte, 4096)
@@ -248,63 +259,23 @@ func TestBufferedClient(t *testing.T) {
 		t.Error(err)
 	}
 
-	expected := []string{
-		`foo.ic:1|c|#dd:2`,
-		`foo.dc:-1|c|#dd:2`,
-		`foo.cc:1|c|#dd:2`,
-		`foo.gg:10.000000|g|#dd:2`,
-		`foo.hh:1.000000|h|#dd:2`,
-		`foo.dd:1.000000|d|#dd:2`,
-		`foo.tt:0.123000|ms|#dd:2`,
-		`foo.ss:ss|s|#dd:2`,
-		`foo.ss:xx|s|#dd:2`,
+	expected := map[string]bool{
+		`foo.ic:1|c|#dd:2`:         true,
+		`foo.dc:-1|c|#dd:2`:        true,
+		`foo.cc:1|c|#dd:2`:         true,
+		`foo.gg:10.000000|g|#dd:2`: true,
+		`foo.hh:1.000000|h|#dd:2`:  true,
+		`foo.dd:1.000000|d|#dd:2`:  true,
+		`foo.tt:0.123000|ms|#dd:2`: true,
+		`foo.ss:ss|s|#dd:2`:        true,
+		`foo.ss:xx|s|#dd:2`:        true,
 	}
 
-	for i, res := range strings.Split(result, "\n") {
-		if res != expected[i] {
-			t.Errorf("Got `%s`, expected `%s`", res, expected[i])
-		}
-	}
-
-	client.Event(&Event{Title: "title1", Text: "text1", Priority: Normal, AlertType: Success, Tags: []string{"tagg"}})
-	client.SimpleEvent("event1", "text1")
-
-	if len(client.commands) != 2 {
-		t.Errorf("Expected to find %d commands, but found %d\n", 2, len(client.commands))
-	}
-
-	client.Lock()
-	err = client.flushLocked()
-	client.Unlock()
-
-	if err != nil {
-		t.Errorf("Error sending: %s", err)
-	}
-
-	if len(client.commands) != 0 {
-		t.Errorf("Expecting send to flush commands, but found %d\n", len(client.commands))
-	}
-
-	buffer = make([]byte, 1024)
-	n, err = io.ReadAtLeast(server, buffer, 1)
-	result = string(buffer[:n])
-
-	if err != nil {
-		t.Error(err)
-	}
-
-	if n == 0 {
-		t.Errorf("Read 0 bytes but expected more.")
-	}
-
-	expected = []string{
-		`_e{6,5}:title1|text1|p:normal|t:success|#dd:2,tagg`,
-		`_e{6,5}:event1|text1|#dd:2`,
-	}
-
-	for i, res := range strings.Split(result, "\n") {
-		if res != expected[i] {
-			t.Errorf("Got `%s`, expected `%s`", res, expected[i])
+	for _, res := range strings.Split(result, "\n") {
+		found := expected[res]
+		delete(expected, res)
+		if found != true {
+			t.Errorf("map does not contain %s", res)
 		}
 	}
 
@@ -341,11 +312,15 @@ func TestBufferedClientBackground(t *testing.T) {
 	client.Set("ss", "xx", nil, 1)
 
 	time.Sleep(client.flushTime * 2)
-	client.Lock()
-	if len(client.commands) != 0 {
-		t.Errorf("Watch goroutine should have flushed commands, but found %d\n", len(client.commands))
+	total := 0
+	for _, buf := range client.buffers {
+		buf.Lock()
+		total += len(buf.commands)
+		buf.Unlock()
 	}
-	client.Unlock()
+	if total != 0 {
+		t.Errorf("Watch goroutine should have flushed commands, but found %d\n", total)
+	}
 }
 
 func TestBufferedClientFlush(t *testing.T) {
@@ -379,12 +354,15 @@ func TestBufferedClientFlush(t *testing.T) {
 	client.Set("ss", "xx", nil, 1)
 
 	client.Flush()
-
-	client.Lock()
-	if len(client.commands) != 0 {
-		t.Errorf("Flush should have flushed commands, but found %d\n", len(client.commands))
+	total := 0
+	for _, buf := range client.buffers {
+		buf.Lock()
+		total += len(buf.commands)
+		buf.Unlock()
 	}
-	client.Unlock()
+	if total != 0 {
+		t.Errorf("Flush should have flushed commands, but found %d\n", total)
+	}
 }
 
 func stringsToBytes(ss []string) [][]byte {
@@ -396,9 +374,9 @@ func stringsToBytes(ss []string) [][]byte {
 }
 
 func TestJoinMaxSize(t *testing.T) {
-	c := Client{}
 	elements := stringsToBytes([]string{"abc", "abcd", "ab", "xyz", "foobaz", "x", "wwxxyyzz"})
-	res, n := c.joinMaxSize(elements, " ", 8)
+	b := StatsBuffer{}
+	res, n := b.joinMaxSize(elements, " ", 8)
 
 	if len(res) != len(n) && len(res) != 4 {
 		t.Errorf("Was expecting 4 frames to flush but got: %v - %v", n, res)
@@ -428,7 +406,7 @@ func TestJoinMaxSize(t *testing.T) {
 		t.Errorf("Join should have returned \"wwxxyyzz\" in frame, but found: %s", res[3])
 	}
 
-	res, n = c.joinMaxSize(elements, " ", 11)
+	res, n = b.joinMaxSize(elements, " ", 11)
 
 	if len(res) != len(n) && len(res) != 3 {
 		t.Errorf("Was expecting 3 frames to flush but got: %v - %v", n, res)
@@ -452,7 +430,7 @@ func TestJoinMaxSize(t *testing.T) {
 		t.Errorf("Join should have returned \"x wwxxyyzz\" in frame, but got: %s", res[2])
 	}
 
-	res, n = c.joinMaxSize(elements, "    ", 8)
+	res, n = b.joinMaxSize(elements, "    ", 8)
 
 	if len(res) != len(n) && len(res) != 7 {
 		t.Errorf("Was expecting 7 frames to flush but got: %v - %v", n, res)
@@ -500,7 +478,7 @@ func TestJoinMaxSize(t *testing.T) {
 		t.Errorf("Join should have returned \"wwxxyyzz\" in seventh frame, but got: %s", res[6])
 	}
 
-	res, n = c.joinMaxSize(elements[4:], " ", 6)
+	res, n = b.joinMaxSize(elements[4:], " ", 6)
 	if len(res) != len(n) && len(res) != 3 {
 		t.Errorf("Was expecting 3 frames to flush but got: %v - %v", n, res)
 
@@ -584,10 +562,11 @@ func TestSendMsgUDP(t *testing.T) {
 	if err != nil {
 		t.Errorf("Expected no error to be returned if message size is smaller or equal to MaxUDPPayloadSize, got: %s", err.Error())
 	}
-
-	client.Lock()
-	err = client.flushLocked()
-	client.Unlock()
+	for _, buf := range client.buffers {
+		buf.Lock()
+		err = buf.flushLocked()
+		buf.Unlock()
+	}
 
 	if err != nil {
 		t.Fatalf("Expected no error to be returned flushing the client, got: %s", err.Error())
@@ -717,8 +696,7 @@ func TestNilSafe(t *testing.T) {
 	assertNotPanics(t, func() {
 		c.send("", "", []byte(""), nil, 1)
 	})
-	assertNotPanics(t, func() { c.Event(NewEvent("", "")) })
-	assertNotPanics(t, func() { c.SimpleEvent("", "") })
+
 	assertNotPanics(t, func() { c.ServiceCheck(NewServiceCheck("", Ok)) })
 	assertNotPanics(t, func() { c.SimpleServiceCheck("", Ok) })
 }
@@ -871,18 +849,24 @@ func TestFlushOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if len(client.commands) != 1 {
-		t.Errorf("Commands buffer should contain 1 item, got %d", len(client.commands))
+	total := 0
+	for _, buf := range client.buffers {
+		total += len(buf.commands)
+	}
+	if total != 1 {
+		t.Errorf("Commands buffer should contain 1 item, got %d", total)
 	}
 
 	err = client.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if len(client.commands) != 0 {
-		t.Errorf("Commands buffer should be empty, got %d", len(client.commands))
+	total = 0
+	for _, buf := range client.buffers {
+		total += len(buf.commands)
+	}
+	if total != 0 {
+		t.Errorf("Commands buffer should be empty, got %d", total)
 	}
 }
 
